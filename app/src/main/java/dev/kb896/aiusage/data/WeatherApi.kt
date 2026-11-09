@@ -30,6 +30,14 @@ class WeatherApi(
     /** Ten seconds all in: a slow answer is worth exactly as much as none. */
     private val client = client.newBuilder().callTimeout(10, TimeUnit.SECONDS).build()
 
+    /**
+     * Why the last read came back empty — "HTTP 429", "SocketTimeoutException", ... — so
+     * the debug card can say what a blank forecast was. Null after a successful read.
+     */
+    @Volatile
+    var trouble: String? = null
+        private set
+
     data class Place(val label: String, val latitude: Double, val longitude: Double)
 
     /**
@@ -134,6 +142,7 @@ class WeatherApi(
             if (list.isEmpty()) return null
             WeatherForecast(now, list, place, nowMs)
         } catch (e: Exception) {
+            trouble = "parse: " + (e.message ?: e.javaClass.simpleName)
             null
         }
     }
@@ -174,7 +183,16 @@ class WeatherApi(
             .header("User-Agent", Agent.saying("rear panel weather"))
             .get().build()
         return try {
-            client.newCall(req).execute().use { res -> if (!res.isSuccessful) null else res.body?.string() }
-        } catch (e: IOException) { null } catch (e: IllegalStateException) { null }
+            client.newCall(req).execute().use { res ->
+                trouble = if (res.isSuccessful) null else "HTTP " + res.code
+                if (res.isSuccessful) res.body?.string() else null
+            }
+        } catch (e: IOException) {
+            trouble = e.javaClass.simpleName + (e.message?.let { ": " + it } ?: "")
+            null
+        } catch (e: IllegalStateException) {
+            trouble = "IllegalStateException" + (e.message?.let { ": " + it } ?: "")
+            null
+        }
     }
 }

@@ -1022,7 +1022,10 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     finished = true
-                    debugNote(if (got == null) "fetch returned null" else "ok, " + got.days.size + " days")
+                    debugNote(
+                        if (got == null) "fetch returned null (" + (graph.weatherApi.trouble ?: "no reason") + ")"
+                        else "ok, " + got.days.size + " days",
+                    )
                     got
                 }
                 if (fetched != null) {
