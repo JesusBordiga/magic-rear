@@ -1031,6 +1031,13 @@ class MainActivity : ComponentActivity() {
                 if (fetched != null) {
                     forecast = fetched
                     forecastKey = key
+                    // The panel's line reads WeatherPoll.latest, which the service sets
+                    // every five minutes. This fetch is the same reading, so hand it over
+                    // and push it at once instead of leaving the back to wait for a tick.
+                    WeatherPoll.latest = fetched.reading()
+                    graph.bridge.update(
+                        StatePayload.encode(graph.repository.state.value, config, WeatherPoll.latest),
+                    )
                 } else if (!finished) {
                     debugNote("timed out after 30s")
                 }

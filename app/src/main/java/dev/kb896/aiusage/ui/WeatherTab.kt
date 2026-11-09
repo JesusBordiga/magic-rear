@@ -82,6 +82,10 @@ object WeatherTab {
             icon = R.drawable.ic_refresh,
         ) { onRefresh() }
         SettingsRows.note(rows, "Weather by Open-Meteo · the place is sent to it to be found")
+        SettingsRows.dim(
+            rows,
+            "On the panel: tap the weather line, or pull the clock page down, for the whole forecast.",
+        )
         if (debugNote != null) SettingsRows.dim(rows, debugNote)
     }
 }

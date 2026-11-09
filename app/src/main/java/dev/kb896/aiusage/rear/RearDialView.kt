@@ -108,6 +108,10 @@ class RearDialView(context: Context) : View(context) {
     /** The weather line's rect as it last drew, so a tap there can open the forecast. */
     private val weatherLineBounds = android.graphics.RectF()
 
+    /** The line's tap and the clock page's downward pull, both armed on the way down. */
+    private var weatherTap = false
+    private var weatherPull = false
+
     /** The forecast sheet: open or not, what it holds, and the lookup behind it. */
     private var weatherSheetOpen = false
     private var weatherSheetForecast: dev.kb896.aiusage.data.WeatherForecast? = null
@@ -136,15 +140,27 @@ class RearDialView(context: Context) : View(context) {
      * coordinates are the resolved place's, which is what the panel is named after.
      */
     private fun fetchWeatherSheet(key: String) {
-        val lat = config.weatherLat ?: return
-        val lon = config.weatherLon ?: return
         if (weatherSheetLoading) return
         weatherSheetLoading = true
         weatherSheetForecast = null
+        val storedLat = config.weatherLat
+        val storedLon = config.weatherLon
+        val useDevice = config.weatherUseDevice
         val place = config.weatherPlaceLabel
         Thread {
-            val fetched = dev.kb896.aiusage.data.WeatherApi(weatherClient)
-                .forecast(lat, lon, place, System.currentTimeMillis())
+            // A typed place has coordinates already. With the location switch on and no
+            // place, the line was drawn from the poll's fix, and the sheet needs one of
+            // its own: the panel process has the same permission, so it asks here.
+            val fix = if (storedLat == null && storedLon == null && useDevice) {
+                kotlinx.coroutines.runBlocking { dev.kb896.aiusage.service.deviceFix(context)() }
+            } else null
+            val lat = storedLat ?: fix?.first
+            val lon = storedLon ?: fix?.second
+            val name = if (place.isNotBlank()) place else "Here"
+            val fetched = if (lat != null && lon != null) {
+                dev.kb896.aiusage.data.WeatherApi(weatherClient)
+                    .forecast(lat, lon, name, System.currentTimeMillis())
+            } else null
             post {
                 weatherSheetForecast = fetched
                 weatherSheetForKey = if (fetched != null) key else ""
@@ -4085,15 +4101,11 @@ class RearDialView(context: Context) : View(context) {
             }
             return true
         }
-        // Tapping the weather line opens it. The rect is recorded as the line draws, so
-        // it follows a longer place name and both themes.
-        if (!aod && !ambient && pager.page == PAGE_NOTICES && shownWeather() != null &&
-            event.actionMasked == android.view.MotionEvent.ACTION_DOWN &&
-            weatherLineBounds.contains(event.x - dxNow, event.y - dyNow)
-        ) {
-            openWeatherSheet()
-            return true
-        }
+        // The weather line is a tap target, and the clock page answers a downward pull:
+        // its pages are found by swiping, and there is nothing below this one, so the
+        // empty direction is the forecast's. Both are armed on the way down and decided
+        // on release, in the DOWN branch below, where the other targets are known — a
+        // drag that begins on a button is never the forecast's.
         if (noticePullTouch(event)) return true
         val onCamera = !ambient && near(cameraButton, event.x, event.y)
         // In ambient mode the whole panel is the way back, not just the button. The
@@ -4146,6 +4158,14 @@ class RearDialView(context: Context) : View(context) {
                 // All three are armed on the way down; which one gets the gesture is
                 // decided on the first move that clears the slop.
                 pager.onDown(event.y, android.os.SystemClock.uptimeMillis())
+                // The weather line's tap and the clock page's downward pull. Armed here
+                // because `hit` is known: a gesture that begins on a button stays the
+                // button's, and the line itself is not one.
+                val weatherPage = !aod && !ambient && pager.page == PAGE_NOTICES &&
+                    shownWeather() != null
+                weatherTap = weatherPage &&
+                    weatherLineBounds.contains(event.x - dxNow, event.y - dyNow)
+                weatherPull = weatherPage && !hit
                 gestureVx = 0f; gestureVy = 0f
                 gestureLastX = event.x; gestureLastY = event.y; gestureLastAt = android.os.SystemClock.uptimeMillis()
                 // WHERE THE WHEEL OWNS THE AXIS. A wheel and a pager both want a vertical
@@ -4163,7 +4183,8 @@ class RearDialView(context: Context) : View(context) {
                 // claim, and with no readout there is no other page — the clock page is
                 // the only one, the pager is off, and a finger on the notifications was
                 // let go on the way down: they could not be scrolled at all.
-                hit || pager.enabled() || onVolume || onScrub || onWheel || onReveal
+                hit || pager.enabled() || onVolume || onScrub || onWheel || onReveal ||
+                    weatherTap || weatherPull
             }
             android.view.MotionEvent.ACTION_MOVE -> {
                 trackGesture(event.x, event.y)
@@ -4245,6 +4266,8 @@ class RearDialView(context: Context) : View(context) {
             }
             android.view.MotionEvent.ACTION_CANCEL -> {
                 // The system taking the gesture away is not a decision to commit to it.
+                weatherTap = false
+                weatherPull = false
                 if (drag == Drag.REVEAL) letGoOfReveal(commit = false)
                 if (drag == Drag.DISMISS) letGoOfDismiss(commit = false)
                 endDrag(commit = false)
@@ -4267,6 +4290,24 @@ class RearDialView(context: Context) : View(context) {
                     return true
                 }
                 drag = Drag.UNDECIDED
+                // The forecast, if this was its gesture: a tap on the line, or a
+                // deliberate downward pull on the clock page — not a wobble, and not a
+                // sideways drag. Decided here so the finger is free to become a drag
+                // first, which is also why the sheet is not opened on the way down.
+                if (!onWheel && (weatherTap || weatherPull)) {
+                    val pull = event.y - downY
+                    val tap = weatherTap &&
+                        Math.abs(event.x - downX) < DRAG_SLOP && Math.abs(pull) < DRAG_SLOP
+                    val swipe = weatherPull && pull >= WEATHER_PULL_UNITS &&
+                        pull > Math.abs(event.x - downX)
+                    weatherTap = false
+                    weatherPull = false
+                    if (tap || swipe) {
+                        pager.onUp(android.os.SystemClock.uptimeMillis())
+                        openWeatherSheet()
+                        return true
+                    }
+                }
                 // A drag is not a tap, and must not also fire whatever it started on.
                 // Without this, letting go of a page swipe that happened to begin over
                 // the close button closed the panel.
@@ -12739,6 +12780,8 @@ class RearDialView(context: Context) : View(context) {
 
         /** How far a finger travels before the panel decides what the gesture is. */
         private const val DRAG_SLOP = 16f
+        /** How far down the clock page a pull must go to open the forecast, in panel units. */
+        private const val WEATHER_PULL_UNITS = 60f
         /** The control centre's blur at full, in panel units (the front's portal preview blurs by it too), and its dim. */
         internal const val CC_BLUR = 22f
         private const val CC_DIM = 0.25f
