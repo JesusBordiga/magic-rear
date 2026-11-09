@@ -27,12 +27,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      # compileSdk 36 and the aidl/build-tools binaries the app asks for. setup-android
-      # accepts the licences, so sdkmanager can install unattended.
+      # The runner image already carries the Android SDK; only the packages this app
+      # needs are installed. Done by hand rather than with setup-android because its
+      # default "tools" package no longer exists in the current SDK repository.
       - name: Install Android SDK packages
-        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+        run: |
+          set -e
+          SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "platform-tools"
 
       - uses: gradle/actions/setup-gradle@v4
 
