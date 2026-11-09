@@ -53,9 +53,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import okhttp3.OkHttpClient
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * The control surface: everything else in the app runs headless (the service,
@@ -328,6 +332,15 @@ class MainActivity : ComponentActivity() {
     private var forecastKey = ""
     private var forecastJob: Job? = null
     private var forecastLoading = false
+    private var forecastNote: String? = null
+    private var forecastToken: Any? = null
+
+    /** Debug builds say on the card how far a fetch got; a release build says nothing. */
+    private fun debugNote(text: String) {
+        if (!BuildConfig.DEBUG) return
+        forecastNote = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()) + " · " + text
+        renderWeatherTab()
+    }
 
     private fun bindTabs() {
         val bar = findViewById<androidx.compose.ui.platform.ComposeView>(R.id.tab_bar)
@@ -977,34 +990,64 @@ class MainActivity : ComponentActivity() {
             forecastJob?.cancel()
         }
 
+        // Set before launching: with the immediate dispatcher the coroutine starts inside
+        // launch(), possibly finishing before the field is assigned below.
+        val token = Any()
+        forecastToken = token
         forecastJob = lifecycleScope.launch {
             forecastLoading = true
-            renderWeatherTab()
-            val fix = if (config.weatherUseDevice) deviceFix(this@MainActivity)() else null
-            val target = WeatherPoll.target(config, fix)
-            if (target == null) {
-                forecastLoading = false
-                renderWeatherTab()
-                return@launch
+            debugNote("start")
+            // Nothing in here may leave the card saying "Refreshing…": the timeout bounds
+            // the whole read (a location fix and a fetch), and the finally clears the flag
+            // however this coroutine ends — including when a newer tap cancels it, whose
+            // finally must not clear the newer job's flag.
+            var finished = false
+            try {
+                val fetched = withTimeoutOrNull(30_000L) {
+                    val fix = if (config.weatherUseDevice) deviceFix(this@MainActivity)() else null
+                    debugNote("fix " + if (fix == null) "none" else "ok")
+                    val target = WeatherPoll.target(config, fix)
+                    if (target == null) {
+                        debugNote(
+                            "no target: useDevice=" + config.weatherUseDevice +
+                                " lat=" + config.weatherLat + " place=" + config.weatherPlace,
+                        )
+                        finished = true
+                        return@withTimeoutOrNull null
+                    }
+                    debugNote("fetch " + target.latitude + "," + target.longitude)
+                    val got = withContext(Dispatchers.IO) {
+                        graph.weatherApi.forecast(
+                            target.latitude, target.longitude, target.label, System.currentTimeMillis(),
+                        )
+                    }
+                    finished = true
+                    debugNote(if (got == null) "fetch returned null" else "ok, " + got.days.size + " days")
+                    got
+                }
+                if (fetched != null) {
+                    forecast = fetched
+                    forecastKey = key
+                } else if (!finished) {
+                    debugNote("timed out after 30s")
+                }
+            } catch (e: Exception) {
+                debugNote("error: " + (e.message ?: e.javaClass.simpleName))
+            } finally {
+                if (forecastToken === token) {
+                    forecastLoading = false
+                    renderWeatherTab()
+                }
             }
-            val fetched = withContext(Dispatchers.IO) {
-                graph.weatherApi.forecast(
-                    target.latitude, target.longitude, target.label, System.currentTimeMillis(),
-                )
-            }
-            if (fetched != null) {
-                forecast = fetched
-                forecastKey = key
-            }
-            forecastLoading = false
-            renderWeatherTab()
         }
     }
 
     /** Redraws the Weather tab's card from the forecast in hand; harmless when it is not on screen. */
     private fun renderWeatherTab() {
         val rows = findViewById<LinearLayout>(R.id.weather_detail_rows) ?: return
-        WeatherTab.render(rows, ConfigStore(this).load(), forecast, forecastLoading) {
+        WeatherTab.render(
+            rows, ConfigStore(this).load(), forecast, forecastLoading, debugNote = forecastNote,
+        ) {
             refreshForecast(force = true)
         }
     }

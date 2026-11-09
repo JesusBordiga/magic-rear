@@ -25,6 +25,7 @@ object WeatherTab {
         config: PanelConfig,
         forecast: WeatherForecast?,
         loading: Boolean,
+        debugNote: String? = null,
         onRefresh: () -> Unit,
     ) {
         rows.removeAllViews()
@@ -81,5 +82,6 @@ object WeatherTab {
             icon = R.drawable.ic_refresh,
         ) { onRefresh() }
         SettingsRows.note(rows, "Weather by Open-Meteo · the place is sent to it to be found")
+        if (debugNote != null) SettingsRows.dim(rows, debugNote)
     }
 }
