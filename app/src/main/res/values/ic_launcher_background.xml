@@ -1,0 +1,7 @@
+<resources>
+    <!--
+      The icon's purple at its edges, for what a launcher's mask shows past the artwork: the
+      artwork is full-bleed, rendered in mipmap/ic_launcher_fg, and larger than the visible part.
+    -->
+    <color name="ic_launcher_background">#5906D4</color>
+</resources>

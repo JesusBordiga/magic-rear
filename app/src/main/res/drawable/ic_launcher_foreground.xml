@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The icon's silhouette for themed icons: the back's glass, its two lenses, a wand. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="5" android:fillColor="#00000000"
+        android:pathData="M39,34H69A15,15 0 0 1 84,49V59A15,15 0 0 1 69,74H39A15,15 0 0 1 24,59V49A15,15 0 0 1 39,34z"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M42,45.5m-7,0a7,7 0 1,1 14,0a7,7 0 1,1 -14,0M42,62.5m-7,0a7,7 0 1,1 14,0a7,7 0 1,1 -14,0"/>
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4" android:strokeLineCap="round" android:pathData="M56,65L74,47"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M61,42l1.6,3.4 3.4,1.6 -3.4,1.6 -1.6,3.4 -1.6,-3.4 -3.4,-1.6 3.4,-1.6z"/>
+</vector>

@@ -1,0 +1,57 @@
+# android / gradle
+*.iml
+.gradle/
+local.properties
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+# ANCHORED, and it matters. This was `release/`, which git treats as "any directory
+# named release, at any depth" — so it silently swallowed app/src/release/, the source
+# set holding the no-op Diagnostics that the release variant compiles against. The file
+# existed on every machine that had ever built the app and on no clone, so debug built
+# everywhere, release built locally, and CI failed with an unresolved reference to a
+# class sitting right there in the working tree. Build output is already covered by
+# `build/` above; this only ever needs to name a real output directory.
+/app/release/
+
+# credentials — never commit an imported token blob
+*.token.json
+credentials.json
+
+# Working material, all of it kept outside this repo in ~/Personal/ai-usage-companion-notes:
+#
+#   docs/mascot   another artist's SVG artwork, scraped and recoloured. Source material
+#                 for the pixel data in MascotFrames, and not ours to redistribute.
+#   docs/media    the phone photo the demo video is composited into, and the geometry
+#                 notes measured against it. Instructions nobody else could follow, for
+#                 rebuilding assets from one particular device.
+#   tools         the scripts that drive that device: the keychain export helper (a
+#                 working recipe for lifting a live credential off a machine), the
+#                 recorder, the stills renderer.
+#
+# What the README displays lives in assets/ and is committed.
+docs/
+tools/
+
+# ide
+.idea/
+*.hprof
+
+# macos
+.DS_Store
+
+# generated media working files, and the local README render
+.rear-demo/
+.readme-preview.html
+
+# Signing material. NEVER commit these — the release key is the one secret in this
+# project that cannot be rotated: losing control of it means anyone can forge an update,
+# and losing the file itself means nobody who installed the app can ever be updated.
+*.jks
+*.keystore
+keystore.properties
+release.jks
+
+# Isolated worktrees for plan execution
+.worktrees/

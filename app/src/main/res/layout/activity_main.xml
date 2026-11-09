@@ -1,0 +1,628 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Structural only: no colour or theming attributes here. Global Constraint is
+  "Colours from Panel.Palette, never literals" — every colour on this screen
+  (background, text, rule lines) is assigned in MainActivity.kt from
+  Panel.Palette / Panel.RAMP_STOPS, not hardcoded here. Same for the
+  Departure Mono typeface: applied programmatically via
+  resources.getFont(R.font.departure_mono), matching the pattern already used
+  by RearDialView, rather than android:fontFamily on every node.
+-->
+<!--
+  The preview is PINNED: it sits outside the ScrollView so it stays in view while the
+  settings beneath it scroll. A setting you cannot see the effect of while you change it
+  is a setting you set three times.
+-->
+<!--
+  A FrameLayout root, so a sheet added on top of it genuinely covers the screen. It was a
+  LinearLayout, which ignores FrameLayout params and appends a "sheet" as one more
+  vertical child — it got the leftover height, its weighted scroller had almost nothing
+  to divide, and the rows would not scroll.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_host"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+<!-- The settings scroll the whole height; the header and the preview float over the top
+     of them, so rows rise behind the preview instead of stopping at an edge below it. -->
+<FrameLayout
+    android:id="@+id/root_layout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- The scroller and, over its top edge, the band that blurs and fades the rows rising
+         under the preview (TopFadeScrollView, TopBlurStrip). -->
+    <FrameLayout
+        android:id="@+id/scroll_frame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+    <dev.kb896.aiusage.ui.glass.TopFadeScrollView
+        android:id="@+id/root_scroll"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false">
+
+        <LinearLayout
+            android:id="@+id/settings_layout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+        <!-- A newer release (UpdateCard): first, right under the preview, over every tab. -->
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_update"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/update_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <!-- Section: recovery instructions, sliders and text unchanged, only the card
+             that groups them is new. -->
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_recovery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <!-- Recovery instructions, shown only for the failure state that applies.
+             recovery_command is deliberately an EditText inside a HorizontalScrollView,
+             not a wrapping TextView: it must stay selectable, on one line, and
+             horizontally scrollable so the exact adb one-liner survives a copy. -->
+        <TextView
+            android:id="@+id/recovery_note"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <HorizontalScrollView
+            android:id="@+id/recovery_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:scrollbars="horizontal"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/recovery_command"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@android:color/transparent"
+                android:cursorVisible="false"
+                android:importantForAutofill="no"
+                android:inputType="none"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
+                android:singleLine="true"
+                android:textSize="13sp" />
+        </HorizontalScrollView>
+
+        <TextView
+            android:id="@+id/recovery_display_absent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <View
+            android:id="@+id/rule_1"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp" />
+
+        <TextView
+            android:id="@+id/setup_heading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Onboarding"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_setup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/setup_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <!-- The tabs' sections share one frame, so a change of tab can slide the old one
+             out and the new one in side by side (MainActivity.showTab). -->
+        <FrameLayout
+            android:id="@+id/tab_pages"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+        <!-- The bottom bar's tabs: General first — what belongs to the whole panel rather
+             than one screen of it — then the panel's three pages and always-on. Onboarding
+             and recovery stay above them all. See MainActivity.bindTabs. -->
+        <LinearLayout
+            android:id="@+id/tab_general"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <View
+            android:id="@+id/rule_2"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp" />
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_control"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <!-- One toggle: Xiaomi's rear-screen app out of the way and the panel up, or back
+             and the panel down. Set by MainActivity.refreshControl. -->
+        <dev.kb896.aiusage.ui.glass.GlassButton
+            android:id="@+id/show_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Show on the back"
+            android:textSize="13sp" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_look"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/look_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <!--
+            ONE SECTION FOR ONE THING. The panel has a single background — a colour, a
+            picture, a video or a shader — chosen here, in General, with only the
+            chosen kind's controls under the choice. See MainActivity.bindBackdrop.
+
+            There is no switch on the heading. There was, and it offered a choice between
+            the panel as it is and the panel with no ground at all — which is the one
+            state that hands the display back to MIUI's SubScreenLauncher. The background
+            is not optional; WHICH background it is, is the only question here.
+        -->
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_backdrop"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical">
+
+        <!-- Inside its card, at the top, like Theme's label — not a heading over it. -->
+        <TextView
+            android:id="@+id/backdrop_heading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Background"
+            android:textSize="13sp" />
+
+        <LinearLayout
+            android:id="@+id/backdrop_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_weather"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/weather_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_general"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/general_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <!-- The people who helped. Last on the screen in a release build. See Credits. -->
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_credits"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:orientation="vertical">
+
+        <!-- Advanced, Credits and the privacy policy: MainActivity.buildSettingsRows. -->
+        <LinearLayout
+            android:id="@+id/about_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <!--
+          Diagnostics slot. Empty here and filled only by the debug variant — the views
+          and their class do not exist in a release build at all, rather than existing
+          and being hidden.
+        -->
+        <FrameLayout
+            android:id="@+id/debug_slot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_usage"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <View
+            android:id="@+id/rule_settings"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp" />
+
+        <TextView
+            android:id="@+id/settings_heading"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Panel"
+            android:textSize="12sp" />
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/accounts_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <TextView
+            android:id="@+id/settings_title_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Title"
+            android:textSize="13sp" />
+
+        <!--
+          The field and its colour on one line. A swatch for the title sitting down in
+          the colour grid with the ramp and the accents would be a control separated from
+          the thing it controls, and this row has width to spare.
+        -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:baselineAligned="false"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <dev.kb896.aiusage.ui.glass.GlassField
+                android:id="@+id/settings_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="CLAUDE USAGE"
+                android:inputType="textCapCharacters"
+                android:maxLines="1"
+                android:textSize="14sp" />
+
+            <dev.kb896.aiusage.ui.glass.GlassChip
+                android:id="@+id/settings_title_color"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="12dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/settings_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <!-- The bottom artwork, in the usage card with the page's other settings rather than
+             a card of its own. -->
+        <LinearLayout
+            android:id="@+id/art_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_clock"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <TextView
+            android:id="@+id/clock_heading"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Clock page"
+            android:textSize="12sp" />
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_clock"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/clock_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_media"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <TextView
+            android:id="@+id/media_heading"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Media page"
+            android:textSize="12sp" />
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_media"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/media_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_aod"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <TextView
+            android:id="@+id/aod_heading"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Always-on"
+            android:textSize="12sp" />
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_aod"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/aod_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_portal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <!-- The portal's guide (PortalGuideCard): above the settings until it is done. Its gap is below
+             it, so the settings start where every other tab's do when it is gone. -->
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_portal_guide"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/portal_guide_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_portal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/portal_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        </LinearLayout>
+
+        <!-- The forecast itself: today and the five days after it. Filled by
+             WeatherTab.render from the forecast MainActivity fetched. -->
+        <LinearLayout
+            android:id="@+id/tab_weather"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+        <dev.kb896.aiusage.ui.glass.GlassCard
+            android:id="@+id/card_weather_detail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/weather_detail_rows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        </dev.kb896.aiusage.ui.glass.GlassCard>
+
+        </LinearLayout>
+
+        </FrameLayout>
+
+        </LinearLayout>
+    </dev.kb896.aiusage.ui.glass.TopFadeScrollView>
+
+    <dev.kb896.aiusage.ui.glass.TopBlurStrip
+        android:id="@+id/top_blur"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_gravity="top" />
+    </FrameLayout>
+
+    <!-- Pinned over the top of the settings: the app's name and the preview. The scroller's
+         top padding is this block's height (MainActivity.bindPinned). -->
+    <LinearLayout
+        android:id="@+id/pinned"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/preview_heading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone"
+            android:text="On the back"
+            android:textSize="12sp" />
+
+        <!-- The app's icon and name, above the preview. Filled from the installed app's own
+             label and icon (MainActivity.bindHeader), so the dev build says "(dev)". -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="24dp"
+            android:paddingTop="18dp"
+            android:paddingEnd="24dp">
+
+            <ImageView
+                android:id="@+id/app_icon"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:importantForAccessibility="no" />
+
+            <TextView
+                android:id="@+id/app_name"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:textColor="#FFFFFFFF"
+                android:textSize="20sp" />
+        </LinearLayout>
+
+        <dev.kb896.aiusage.ui.PanelPreviewView
+            android:id="@+id/panel_preview"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="24dp" />
+
+        <View
+            android:id="@+id/rule_pinned"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp" />
+    </LinearLayout>
+</FrameLayout>
+
+<!-- The bottom bar: Kyant's liquid-glass tabs, in Compose. It floats over the bottom
+     of the scroll, which runs on underneath it and is what its glass bends. -->
+<androidx.compose.ui.platform.ComposeView
+    android:id="@+id/tab_bar"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom" />
+</FrameLayout>

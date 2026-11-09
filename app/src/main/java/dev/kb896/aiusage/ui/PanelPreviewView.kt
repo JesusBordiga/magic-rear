@@ -1,0 +1,383 @@
+package dev.kb896.aiusage.ui
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.RenderEffect
+import android.graphics.Shader
+import android.util.AttributeSet
+import android.widget.FrameLayout
+import androidx.core.graphics.drawable.toBitmap
+import androidx.core.view.isVisible
+import dev.kb896.aiusage.Panel
+import dev.kb896.aiusage.data.Account
+import dev.kb896.aiusage.data.AccountStatus
+import dev.kb896.aiusage.data.DashboardState
+import dev.kb896.aiusage.data.Health
+import dev.kb896.aiusage.data.UsageSnapshot
+import dev.kb896.aiusage.data.UsageWindow
+import dev.kb896.aiusage.data.WindowKind
+import dev.kb896.aiusage.data.PanelConfig
+import dev.kb896.aiusage.rear.RearDialView
+
+/**
+ * What the back of the phone is showing, on the front of it.
+ *
+ * Holds a REAL [RearDialView] at its true 904x572 and scales it down, rather than
+ * reimplementing the panel at preview size. Two things follow from that, and both are
+ * the reason it is built this way:
+ *
+ *  * It cannot drift. A second implementation would be a second thing to keep in step,
+ *    and the whole point of a preview is to be trusted — one that lies is worse than
+ *    none, because a setting that looks wrong here would send you hunting for a bug on
+ *    the panel that does not exist.
+ *  * It animates. Bars ease, rings sweep, mascots walk, the burn-in drift drifts. This
+ *    is the panel, just smaller.
+ *
+ * Scaling with a view transform rather than by drawing into a bitmap keeps it live and
+ * costs nothing extra: the child was going to draw anyway.
+ */
+class PanelPreviewView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+) : FrameLayout(context, attrs) {
+
+    private val dial = RearDialView(context)
+    /** The App Portal's sheet over the panel, while the Portal tab is chosen ([portal]). */
+    private val sheet = PortalSheetPreview(context).apply { visibility = GONE }
+
+    /**
+     * The usage the back has, or, with no account connected, made-up usage for two accounts: the
+     * preview shows the Usage tab's page whatever there is to show on it. Never on the back.
+     */
+    var state: DashboardState = DashboardState.EMPTY
+        set(value) {
+            field = value
+            val none = Account.entries.none { a -> value.statuses.firstOrNull { it.account == a }?.connected ?: true }
+            dial.state = if (none) fakeUsage() else value
+        }
+
+    private fun fakeUsage(): DashboardState {
+        val now = System.currentTimeMillis()
+        val hour = 3_600_000L
+        fun account(a: Account, session: Float, week: Float, scoped: Float, mascot: String) = AccountStatus(
+            a, Health.OK,
+            UsageSnapshot(listOf(
+                UsageWindow(WindowKind.SESSION, "All 5h", session, now + 3 * hour),
+                UsageWindow(WindowKind.WEEKLY_ALL, "All 7d", week, now + 60 * hour),
+                UsageWindow(WindowKind.WEEKLY_SCOPED, "Opus 7d", scoped, now + 60 * hour),
+            ), now),
+            planTier = "MAX 5X", mascot = mascot,
+        )
+        return DashboardState(now, listOf(
+            account(Account.PERSONAL, 0.42f, 0.67f, 0.18f, dev.kb896.aiusage.data.MascotMood.WALK),
+            account(Account.WORK, 0.08f, 0.31f, 0.12f, dev.kb896.aiusage.data.MascotMood.MUSCLE),
+        ))
+    }
+
+    var config: PanelConfig
+        get() = dial.config
+        // The notification too: its colours and whether it says the message, as they are set.
+        set(value) { dial.config = value; sheet.config = value; peek.invalidate() }
+    /** The weather reading the back has; without it the preview had no weather line at all. */
+    var weather: dev.kb896.aiusage.data.WeatherReading?
+        get() = dial.weather
+        set(value) { dial.weather = value; dial.invalidate() }
+
+    /**
+     * Mirror a notification onto the preview, exactly as the panel receives it.
+     *
+     * The preview and the panel are the same view class drawing the same config, but
+     * they live in different processes and only `:rear` was listening — so the preview
+     * showed the readout and none of the things that arrive by broadcast. Somebody
+     * setting up notification mirroring or the media row on the front screen was
+     * configuring features they could not see.
+     */
+    fun showNotification(
+        app: String,
+        pkg: String,
+        title: String,
+        text: String,
+        moreTitle: String,
+        moreText: String,
+    ) = dial.showNotification(app, pkg, title, text, moreTitle, moreText)
+
+    fun showMedia(
+        active: Boolean,
+        title: String,
+        artist: String,
+        playing: Boolean,
+        artPath: String,
+        durationMs: Long,
+        positionMs: Long,
+        positionAtMs: Long,
+        speed: Float,
+        lyricsLrc: String = "",
+        lyricsFor: String = "",
+    ) {
+        realMedia = active
+        if (active) {
+            faking = false
+            removeCallbacks(fakeAgain)
+            dial.showMedia(
+                active, title, artist, playing, artPath,
+                durationMs, positionMs, positionAtMs, speed, lyricsLrc, lyricsFor,
+            )
+        } else fakeMedia()
+    }
+
+    /** Whether the back has a track of its own; without one, the preview plays a made-up one. Never on the back. */
+    private var realMedia = false
+
+    /**
+     * The made-up track is up. Once: "nothing playing" comes again and again, and each new track
+     * starts its record's arrival over, so pushed each time it never finished arriving.
+     */
+    private var faking = false
+
+    private fun fakeMedia() {
+        if (faking) return
+        faking = true
+        playFake()
+    }
+
+    /**
+     * From the start, playing: the position runs 0 to 100% over the track and the record turns with
+     * it (RearDialView.vinylAngle), and at the end it starts again. The same track each time, so it
+     * is a seek, not a new arrival.
+     */
+    private fun playFake() {
+        removeCallbacks(fakeAgain)
+        if (!faking || realMedia) return
+        dial.showMedia(
+            active = true, title = "Apple", artist = "Bladee", playing = true, artPath = fakeCover(),
+            durationMs = FAKE_TRACK_MS, positionMs = 0L,
+            positionAtMs = android.os.SystemClock.elapsedRealtime(),
+        )
+        postDelayed(fakeAgain, FAKE_TRACK_MS)
+    }
+
+    private val fakeAgain = Runnable { playFake() }
+
+    /**
+     * The made-up track's cover (res/raw/preview_cover.jpg) as a file, which is how the panel
+     * takes a cover (MediaWatcher writes the real one to one). Empty if it cannot be written.
+     */
+    private fun fakeCover(): String = runCatching {
+        val file = java.io.File(context.cacheDir, "preview-cover.jpg")
+        if (!file.exists()) context.resources.openRawResource(dev.kb896.aiusage.R.raw.preview_cover).use { input ->
+            file.outputStream().use { input.copyTo(it) }
+        }
+        file.path
+    }.getOrDefault("")
+
+    /**
+     * The App Portal's sheet as the back shows it, open over the panel: the panel blurred
+     * and dimmed under it, as SurfaceFlinger blurs the rear under the shell's sheet — by
+     * the control centre's blur, which the sheet's is tuned to read as (ShellOverlay.BLUR_MAX).
+     * Off, the panel as it is. A RenderEffect is a hardware renderer's: drawn in software,
+     * the panel goes unblurred and the sheet's dim alone is over it.
+     */
+    fun portal(on: Boolean) {
+        val to = if (on) 1f else 0f
+        if (portalTo == to) return
+        portalTo = to
+        portalAnim?.cancel()
+        val from = if (sheet.isVisible) sheet.progress else 0f
+        sheet.isVisible = true
+        // As the back's sheet comes up from a pull let go at rest: its settle, over the control
+        // centre's time for the distance (ControlCenter.settleMs), the blur and dim coming with it.
+        portalAnim = android.animation.ValueAnimator.ofFloat(from, to).apply {
+            duration = dev.kb896.aiusage.rear.ControlCenter.settleMs(Math.abs(to - from), 0f)
+            interpolator = android.view.animation.PathInterpolator(0.2f, 0f, 0f, 1f)
+            addUpdateListener { a -> portalAt(a.animatedValue as Float) }
+            start()
+        }
+    }
+
+    private var portalTo = 0f
+    private var portalAnim: android.animation.ValueAnimator? = null
+
+    private fun portalAt(p: Float) {
+        sheet.progress = p
+        sheet.isVisible = p > 0f
+        val blur = RearDialView.CC_BLUR * p
+        dial.setRenderEffect(if (blur >= 0.5f) RenderEffect.createBlurEffect(blur, blur, Shader.TileMode.CLAMP) else null)
+    }
+
+    /**
+     * A notification popping in at the top of the preview and back out, as one arrives on the back
+     * (ShellNotices' banner, drawn by the same NoticeCard): while the Notifications settings are in
+     * view on the General tab (MainActivity.peekNotice). A made-up one, with this app's icon.
+     */
+    fun notice(on: Boolean) = peek.show(on)
+
+    private val peek = NoticePeek(context)
+
+    private inner class NoticePeek(context: Context) : android.view.View(context) {
+        private var shown = 0f
+        private var to = 0f
+        private var anim: android.animation.ValueAnimator? = null
+        private val icon: Bitmap? by lazy {
+            runCatching { context.packageManager.getApplicationIcon(context.packageName).toBitmap(96, 96) }.getOrNull()
+        }
+        private val card = dev.kb896.aiusage.rear.NoticeCard(
+            { dev.kb896.aiusage.rear.PanelType.face(resources, config.theme, config.font) },
+            { cornerPx },
+            { icon },
+        )
+        private val item = dev.kb896.aiusage.rear.NoticeShade.Item("preview", context.packageName, "Messages", "Ana", "Are we still on for tonight?")
+        private val rect = android.graphics.RectF()
+        private val textTween = dev.kb896.aiusage.rear.ColorTween()
+        private val groundTween = dev.kb896.aiusage.rear.ColorTween()
+        private var body = 1f
+        private var bodyFrom = 1f
+        private var bodyTo = 1f
+        private var bodyAt = 0L
+
+        fun show(on: Boolean) {
+            val target = if (on) 1f else 0f
+            if (target == to) return
+            to = target
+            anim?.cancel()
+            // The banner's own times: in over IN_MS, out over OUT_MS (ShellNotices).
+            anim = android.animation.ValueAnimator.ofFloat(shown, target).apply {
+                duration = if (on) 260L else 220L
+                interpolator = if (on) android.view.animation.DecelerateInterpolator(2f) else android.view.animation.AccelerateInterpolator(2f)
+                addUpdateListener { a -> shown = a.animatedValue as Float; invalidate() }
+                start()
+            }
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            if (shown <= 0f) return
+            val c = config
+            // A change of colour, or of the message line, fades as the panel's own colours do
+            // (ColorTween, Tween.DURATION_MS).
+            val now = android.os.SystemClock.uptimeMillis()
+            val text = textTween.advance(c.notificationTint, now)
+            val ground = groundTween.advance(c.notificationGround, now)
+            val wantBody = if (c.showNotificationText) 1f else 0f
+            if (wantBody != bodyTo) { bodyFrom = body; bodyTo = wantBody; bodyAt = now }
+            val t = ((now - bodyAt).toFloat() / dev.kb896.aiusage.rear.Tween.DURATION_MS).coerceIn(0f, 1f)
+            body = bodyFrom + (bodyTo - bodyFrom) * dev.kb896.aiusage.rear.Tween.easeInOut(t)
+            val fading = text != c.notificationTint || ground != c.notificationGround || t < 1f
+            val look = dev.kb896.aiusage.rear.NoticeCard.Look(c.theme, text, ground, dev.kb896.aiusage.rear.SheetTint.of(c.theme.isGlass, c.glassStyle))
+            val h = dev.kb896.aiusage.rear.NoticeCard.HEIGHT
+            val y = -(1f - shown) * h
+            val left = Panel.CUTOUT_RIGHT + 10f
+            if (c.theme.isGlass) rect.set(left, dev.kb896.aiusage.rear.NoticeCard.MARGIN, Panel.WIDTH - dev.kb896.aiusage.rear.NoticeCard.MARGIN, h)
+            else rect.set(left, 0f, Panel.WIDTH.toFloat(), h)
+            canvas.save()
+            canvas.translate(0f, y)
+            card.draw(canvas, rect, item, 1f, square = !c.theme.isGlass, screenTop = rect.top + y, look = look, body = body)
+            if (fading) postInvalidateOnAnimation()
+            canvas.restore()
+        }
+    }
+
+    /** The pinned apps for the portal's sheet, in grid order — see PortalSheetPreview.apps. */
+    fun portalApps(labels: List<String>, icons: List<Bitmap?>) = sheet.apps(labels, icons)
+
+    /** The back's corner radius in panel pixels, until the back says otherwise. */
+    private var cornerPx = DEFAULT_CORNER
+    private var last: RearDialView.Mirror? = null
+
+
+    init {
+        // Nothing playing until the back says otherwise.
+        post { if (!realMedia) fakeMedia() }
+        addView(dial, LayoutParams(Panel.WIDTH, Panel.HEIGHT))
+        addView(sheet, LayoutParams(Panel.WIDTH, Panel.HEIGHT))
+        addView(peek, LayoutParams(Panel.WIDTH, Panel.HEIGHT))
+        clipChildren = true
+        // Black behind the panel, as the rear display is: a translucent ground or picture
+        // must not let the settings scrolling behind the preview show through it.
+        setBackgroundColor(android.graphics.Color.BLACK)
+        dial.interactive = false
+        // The slider has its own timeout; the back re-locks it under always-on, so the
+        // preview does the same from the last mirror rather than letting it leave alone.
+        dial.onLockExpired = { last?.let { if (it.locked) dial.lock() } }
+        // The real display's rounded corners, so the preview is the shape of the back.
+        clipToOutline = true
+        outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, cornerPx * view.width / Panel.WIDTH)
+            }
+        }
+    }
+
+    /**
+     * The back's state: page, always-on, slider, rings, table lights, corner. Not its dim:
+     * the preview is for seeing the settings, and a preview that went dark with the back's
+     * double tap hid the very thing being set.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun mirror(m: RearDialView.Mirror, dim: Boolean) {
+        last = m
+        if (cornerPx != m.corner) { cornerPx = m.corner; invalidateOutline() }
+        dial.mirror(shown(m))
+    }
+
+    /**
+     * What the settings' bottom bar has chosen to look at: a page of the panel, or
+     * always-on — shown here over whatever the back is doing, so each tab previews the
+     * screen its settings are for. The rest of the back's state (rings, table lights,
+     * the corner) is still mirrored. Null and false: the back as it is.
+     */
+    private var pageShown: Int? = null
+    private var aodShown = false
+
+    fun show(page: Int?, aod: Boolean) {
+        pageShown = page
+        aodShown = aod
+        val m = last ?: RearDialView.Mirror(page ?: RearDialView.PAGE_READOUT, false, false, false, false, cornerPx)
+        dial.mirror(shown(m))
+    }
+
+    private fun shown(m: RearDialView.Mirror): RearDialView.Mirror = when {
+        // The rings closed as always-on closes them on the back, and open on a page —
+        // the back's own state said "open" while it was awake, so the Always-on tab
+        // showed a filled ring the back never shows there.
+        aodShown -> m.copy(aod = true, locked = true, ringsClosed = true)
+        pageShown != null -> m.copy(page = pageShown!!, aod = false, locked = false, ringsClosed = false)
+        else -> m
+    }
+
+    private companion object {
+        /** The 17 Pro's rear display corner, in its own pixels, until measured. */
+        const val DEFAULT_CORNER = 97f
+        /** Short, so the whole run from the start to the end and round again is seen. */
+        const val FAKE_TRACK_MS = 30_000L
+    }
+
+    /**
+     * The back's real proportions. The panel is drawn in its 904x572 units and the back
+     * stretches it to its own pixels, a little differently on each axis on a Pro Max; the
+     * preview stretches it the same way, so it is the shape of the phone's own back.
+     */
+    private val aspect = dev.kb896.aiusage.ui.video.RearSize.pixels(context).let { (w, h) -> w.toFloat() / h }
+
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val width = MeasureSpec.getSize(widthSpec)
+        val height = (width / aspect).toInt()
+        setMeasuredDimension(width, height)
+        for (child in listOf(dial, sheet, peek)) child.measure(
+            MeasureSpec.makeMeasureSpec(Panel.WIDTH, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(Panel.HEIGHT, MeasureSpec.EXACTLY),
+        )
+    }
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        // The sheet and the notification over the panel, laid and scaled alike.
+        for (child in listOf(dial, sheet, peek)) {
+            child.layout(0, 0, Panel.WIDTH, Panel.HEIGHT)
+            // Pivot at the top-left so the scaled child lands exactly on this view's origin;
+            // the default pivot is the centre, which would leave it offset by half the
+            // difference between the panel's size and the preview's.
+            child.pivotX = 0f
+            child.pivotY = 0f
+            child.scaleX = width / Panel.WIDTH.toFloat()
+            child.scaleY = height / Panel.HEIGHT.toFloat()
+        }
+    }
+}

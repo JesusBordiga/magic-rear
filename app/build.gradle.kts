@@ -1,0 +1,132 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+android {
+    namespace = "dev.kb896.aiusage"
+    compileSdk = 36
+
+    // buildConfig: BuildConfig.DEBUG gates the diagnostics section — see MainActivity.
+    buildFeatures { aidl = true; buildConfig = true; compose = true }
+
+    defaultConfig {
+        applicationId = "dev.kb896.aiusage"
+        minSdk = 34
+        targetSdk = 36
+        // Version comes from the release tag when CI is building one, so a published APK
+        // cannot go on claiming an old number while the tags move past it. Locally it
+        // stays <version>-dev, which is a useful thing to see in an installed build.
+        //
+        // This is the ONLY place a version is written down. Everything that needs to say
+        // what it is — the User-Agent this app sends, and anything added later — reads
+        // BuildConfig.VERSION_NAME rather than repeating the digits. Four User-Agent
+        // headers were still introducing themselves as 0.1 long after this line had
+        // moved on, which is the drift the comment above was already warning about.
+        //
+        // versionCode must increase for every update Android will accept, and a tag name
+        // does not give a number to derive one from. CI_PIPELINE_IID is monotonic per
+        // project, which is exactly the guarantee needed and nothing more.
+        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
+        versionName = System.getenv("CI_COMMIT_TAG")?.removePrefix("v") ?: "0.9.89-dev"
+        ndk { abiFilters += "arm64-v8a" }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["appLabel"] = "Magic Rear"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    /**
+     * Release signing, from the environment — never from a file in this repository.
+     *
+     * This used to be `signingConfigs.getByName("debug")`, which is fine for a build you
+     * install on your own phone over a cable and actively wrong for one you hand to
+     * anyone else: the debug key is not a secret, so anyone can forge an update for it.
+     *
+     * Absent credentials produce an UNSIGNED release rather than a debug-signed one. An
+     * unsigned APK refuses to install and says so; a debug-signed one installs happily
+     * and is the thing we are trying not to publish.
+     */
+    val releaseStore = System.getenv("KEYSTORE_PATH")
+    if (releaseStore != null) {
+        signingConfigs.create("release") {
+            storeFile = file(releaseStore)
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Debug builds are their own app (dev.kb896.<app>.dev, "(dev)", a "dev" tab on the
+            // icon from src/debug/res), so one installs beside the release instead of over it.
+            applicationIdSuffix = ".dev"
+            manifestPlaceholders["appLabel"] = "Magic Rear (dev)"
+        }
+        release {
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Explicitly NOT debuggable, and explicitly not the debug key. The token
+            // store is only as private as the app's uid: `run-as` on a debuggable build
+            // runs AS that uid, so it can read the encrypted tokens and use the very
+            // Keystore key that encrypted them.
+            isDebuggable = false
+            signingConfig = signingConfigs.findByName("release")
+        }
+    }
+
+    testOptions { unitTests { isIncludeAndroidResources = true } }
+    // The lifecycle library's LiveData check crashes lint itself on this Kotlin (an
+    // IncompatibleClassChangeError inside the detector, reading Panel.kt) and failed the
+    // release build. The app has no LiveData for it to check.
+    lint { disable += "NullSafeMutableLiveData" }
+}
+
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+
+dependencies {
+    // lifts Android's hidden-API filter for this process only, so the MIUI window flag the
+    // rear screen's double tap needs can be read and set (see RearActivity.takeOverDoubleTap)
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    // ComponentActivity + lifecycleScope — MainActivity collects a StateFlow (Task 17).
+    implementation("androidx.activity:activity-ktx:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+    // The settings' bottom bar: Kyant's liquid-glass tabs (LiquidBottomTabs, ported from
+    // the Backdrop catalog) on the Backdrop library, in a ComposeView. 1.0.x is the
+    // Android line; 2.x is Compose Multiplatform.
+    implementation(platform("androidx.compose:compose-bom:2025.08.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("io.github.kyant0:backdrop:1.0.6")
+    // The video background's clip is cut once, on the phone, by Media3's Transformer: trim,
+    // crop, scale to the rear display, no audio. See ui/video/ClipExport.
+    implementation("androidx.media3:media3-transformer:1.11.1")
+    implementation("androidx.media3:media3-effect:1.11.1")
+    implementation("androidx.media3:media3-common:1.11.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // RingGeometryTest needs a real android.os.Bundle (put/get/containsKey) — the plain
+    // JVM mockable-android.jar throws "not mocked" for it, same trap as org.json (see
+    // UsageParser.kt). Scoped to that one test class via @RunWith(RobolectricTestRunner).
+    testImplementation("org.robolectric:robolectric:4.13")
+    // ApplicationProvider, which is how every Robolectric test here gets the Context the
+    // glass views need in their constructors — Robolectric alone does not supply one.
+    testImplementation("androidx.test:core:1.5.0")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+}

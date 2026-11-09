@@ -1,0 +1,123 @@
+# Build, sign and publish an APK when a version tag is pushed.
+#
+#     git tag v0.2 && git push origin v0.2
+#
+# GitLab Releases do not host binaries the way GitHub's do — a release carries *links*.
+# So the APK goes to the project's Generic Package Registry first, and the release then
+# points at it. Both live under the same project; nothing leaves GitLab.
+#
+# Required CI/CD variables (Settings → CI/CD → Variables), all masked and protected:
+#
+#   KEYSTORE_BASE64     base64 of your release keystore   (type: variable, masked)
+#   KEYSTORE_PASSWORD   its password                      (masked)
+#   KEY_ALIAS           the key alias inside it           (masked)
+#   KEY_PASSWORD        that key's password               (masked)
+#
+# Create the keystore once, and keep it somewhere you will not lose it — losing it means
+# never being able to update this app on a device that has it installed:
+#
+#   keytool -genkey -v -keystore release.jks -alias release \
+#           -keyalg RSA -keysize 4096 -validity 10000
+#   base64 -i release.jks | pbcopy      # paste into KEYSTORE_BASE64
+#
+# NEVER commit release.jks.
+
+stages: [test, build, release]
+
+# Every job runs on the homelab's docker runner (brigadahq-docker), not GitLab's
+# metered shared runners.
+default:
+  tags: [docker]
+  image: ghcr.io/cirruslabs/android-sdk:36
+  before_script:
+    - export GRADLE_USER_HOME="$CI_PROJECT_DIR/.gradle"
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths: [.gradle/wrapper, .gradle/caches]
+
+test:
+  stage: test
+  script:
+    - ./gradlew --no-daemon :app:testDebugUnitTest
+  artifacts:
+    when: always
+    reports:
+      junit: app/build/test-results/testDebugUnitTest/TEST-*.xml
+    expire_in: 1 week
+
+# Every push builds an unsigned release, so a broken release build is caught on the
+# branch rather than at tag time when you are trying to ship.
+build:
+  stage: build
+  script:
+    - ./gradlew --no-daemon :app:assembleRelease
+  artifacts:
+    paths: [app/build/outputs/apk/release/]
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+package:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      if [ -z "$KEYSTORE_BASE64" ]; then
+        echo "KEYSTORE_BASE64 is not set — refusing to publish an unsigned or debug-signed APK."
+        echo "See the header of .gitlab-ci.yml."
+        exit 1
+      fi
+    - echo "$KEYSTORE_BASE64" | base64 -d > "$CI_PROJECT_DIR/release.jks"
+    - export KEYSTORE_PATH="$CI_PROJECT_DIR/release.jks"
+    - export VERSION_CODE="$CI_PIPELINE_IID"
+    - ./gradlew --no-daemon :app:assembleRelease
+    # Prove it is signed AND not debuggable before anything is published. A silently
+    # unsigned build is the failure this whole job exists to prevent.
+    - APK=app/build/outputs/apk/release/app-release.apk
+    - test -f "$APK" || { echo "no signed APK produced — check the signing variables"; exit 1; }
+    - $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK"
+    - $ANDROID_HOME/build-tools/36.0.0/aapt dump badging "$APK" | grep -q "application-debuggable" && { echo "APK is debuggable — refusing to publish"; exit 1; } || true
+    - cp "$APK" "ai-usage-companion-$CI_COMMIT_TAG.apk"
+    - |
+      curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+           --upload-file "ai-usage-companion-$CI_COMMIT_TAG.apk" \
+           "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ai-usage-companion/$CI_COMMIT_TAG/ai-usage-companion-$CI_COMMIT_TAG.apk"
+  artifacts:
+    paths: ["ai-usage-companion-*.apk"]
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs: [package]
+  script:
+    - echo "Releasing $CI_COMMIT_TAG"
+    # The notes: the annotated tag's message, then the install text. The app's update card and
+    # notification and the 896 Store all show this description, and with the install text
+    # alone they had no word of what changed. A tag without a message leaves the install text.
+    - |
+      {
+        if [ -n "$CI_COMMIT_TAG_MESSAGE" ]; then printf '%s\n\n' "$CI_COMMIT_TAG_MESSAGE"; fi
+        echo 'Install the APK below on a Xiaomi 17 Pro, 17 Pro Max, 18 Pro or 18 Pro Max running HyperOS 3 / 4 or newer.'
+        echo
+        echo "Read the README's **Please read this first** and **Setup** sections first — the app cannot place the panel without Shizuku running, and the AI usage readout holds your account's sign-in."
+      } > release-notes.md
+    - cat release-notes.md
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "$CI_COMMIT_TAG"
+    description: release-notes.md
+    assets:
+      links:
+        - name: "ai-usage-companion-$CI_COMMIT_TAG.apk"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ai-usage-companion/$CI_COMMIT_TAG/ai-usage-companion-$CI_COMMIT_TAG.apk"
+          link_type: package
+          # The direct-asset path gives every release the same permanent address for its
+          # APK — /-/releases/permalink/latest/downloads/ai-usage-companion.apk — which is
+          # what the site and the README link to, so the newest build needs no rebuild of
+          # anything to be the one people get.
+          filepath: "/ai-usage-companion.apk"

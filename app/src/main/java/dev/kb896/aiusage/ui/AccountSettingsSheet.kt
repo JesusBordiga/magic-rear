@@ -1,0 +1,509 @@
+package dev.kb896.aiusage.ui
+
+import android.app.Activity
+import android.content.Context
+import android.view.ViewGroup
+import dev.kb896.aiusage.R
+import android.widget.LinearLayout
+import dev.kb896.aiusage.Panel
+import dev.kb896.aiusage.data.Account
+import dev.kb896.aiusage.auth.TokenStatus
+import dev.kb896.aiusage.data.ConfigStore
+import dev.kb896.aiusage.data.ProfileStore
+import dev.kb896.aiusage.data.MascotMood
+import dev.kb896.aiusage.data.PanelConfig
+import dev.kb896.aiusage.data.RingMetric
+import dev.kb896.aiusage.data.RingOwners
+import dev.kb896.aiusage.data.RingSpec
+import dev.kb896.aiusage.data.RingWindow
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import dev.kb896.aiusage.rear.MascotRenderer
+
+
+/**
+ * Everything about ONE account, as a page of the main screen.
+ *
+ * It opens in place of the Usage tab's settings, under the main screen's own pinned
+ * preview — sliding in as a tab does, and back out on Back. It had a screen of its own
+ * over the main one, with a preview of just this account, and that duplicated in worse
+ * form everything the main screen already does: the silk, the blur band under the
+ * preview, the glass, the preview itself (which showed one ring when the account had
+ * both). Here the preview is the panel as it is.
+ *
+ * A page rather than another section on the Usage tab: the panel is meant to grow past
+ * two accounts, and an eighth account should be an eighth row there, not eight more
+ * screens' worth of scrolling before you reach the artwork settings.
+ */
+object AccountSettingsSheet {
+
+    /** Receivers registered by the open page, unregistered when it closes. */
+    private val sheetReceivers = mutableListOf<android.content.BroadcastReceiver>()
+
+    /** Collectors running for the open page, cancelled when it closes. */
+    private val sheetJobs = mutableListOf<kotlinx.coroutines.Job>()
+
+    /**
+     * Fill [content] with the account's sections: a Back button, then a card per section.
+     * [release] when the page closes.
+     */
+    fun fill(
+        context: Context,
+        content: LinearLayout,
+        index: Int,
+        onChange: (PanelConfig) -> Unit,
+        onBack: () -> Unit,
+    ) {
+        release(context)
+        val account = Account.entries.getOrNull(index) ?: return
+        val store = ConfigStore(context)
+        val match = ViewGroup.LayoutParams.MATCH_PARENT
+        val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+        val glass = dev.kb896.aiusage.ui.glass.UiTheme.isGlass(context)
+
+        /** A section: a card with its title at the top, as the tabs' cards have. */
+        fun card(title: String): LinearLayout = dev.kb896.aiusage.ui.glass.GlassCard(context).also { c ->
+            c.addView(android.widget.TextView(context).apply {
+                text = title
+                dev.kb896.aiusage.ui.glass.CardTitle.style(this)
+            })
+            content.addView(c, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(context, 4) })
+        }
+
+        // Rebuilt after every edit, because a change to the label renames the rows below
+        // it and a change to a ring renames its own. Reconciling in place would be more
+        // code than rebuilding a list this short.
+        fun build() {
+            content.removeAllViews()
+            // A way back at the top, its own width — the system Back does the same.
+            val back = (if (glass) dev.kb896.aiusage.ui.glass.GlassButton(context) else android.widget.Button(context)).apply {
+                text = "‹  Back"
+                textSize = 14f
+                setTextColor(Panel.Palette.FG)
+                typeface = UiType.of(context)
+                setOnClickListener { onBack() }
+            }
+            content.addView(back, LinearLayout.LayoutParams(wrap, wrap))
+            val config = store.load()
+            val style = config.styleFor(index)
+
+            fun write(edit: (PanelConfig) -> PanelConfig) {
+                val next = edit(store.load())
+                store.save(next)
+                onChange(next)
+            }
+
+            // ---- connection ----------------------------------------------------
+            //
+            // One control at a time, for the state the account is actually in. Both
+            // routes and a paste field were on screen permanently, including for an
+            // account already connected, where all three were noise around the one thing
+            // a signed-in user might want: to sign out.
+            val record = dev.kb896.aiusage.service.Graph.of(context).store.load(account)
+            val connection = card("Connection")
+            connection.addView(android.widget.TextView(context).apply {
+                text = TokenStatus.describe(record)
+                textSize = 12f
+                setTextColor(
+                    if (TokenStatus.healthy(record)) Panel.Palette.WORK else Panel.Palette.CRIT)
+                typeface = UiType.of(context)
+                setPadding(0, dp(context, 8), 0, 0)
+            })
+
+            if (record != null) {
+                SettingsRows.navigation(connection, "Sign out", icon = R.drawable.ic_logout) {
+                    // Confirmed, because it is not undoable by tapping again: signing back
+                    // in means a browser round trip, or finding the credential JSON a
+                    // second time.
+                    // Signing out by hand forgets EVERYTHING the phone holds about the
+                    // account — credential, plan, name, email, organisation, usage history,
+                    // the last numbers — so nothing stale can come back. An expiry is not a
+                    // sign-out: it keeps its numbers and shows the ghost.
+                    Modal.show(
+                        Modal.builder(context)
+                            .setTitle("Sign out")
+                            .setMessage("Forget everything about this account on this phone — credential, plan, name, usage history?")
+                            .setNegativeButton("Cancel", null)
+                            .setPositiveButton("Sign out") { _, _ ->
+                                val graph = dev.kb896.aiusage.service.Graph.of(context)
+                                graph.store.clear(account)
+                                dev.kb896.aiusage.data.ProfileStore(context).clear(account)
+                                dev.kb896.aiusage.data.UsageHistory(context).clear(account)
+                                graph.repository.signedOut(account)
+                                build()
+                            },
+                        danger = true,
+                    )
+                }
+            } else {
+                SettingsRows.navigation(connection, "Connect this account", icon = R.drawable.ic_login) {
+                    chooseConnection(context, account) { build() }
+                }
+            }
+
+            // ---- name and colours ----------------------------------------------
+            val looks = card("Name & colours")
+            // Capped at what the heading can draw beside its plan tag — see TitleLimits.
+            val nameMax = TitleLimits.accountName(context)
+            SettingsRows.textField(
+                looks, "Name  (max $nameMax)", style.label ?: account.label, nameMax,
+            ) { typed ->
+                write { it.copy(accounts = it.withStyle(index) { s ->
+                    s.copy(label = typed.ifBlank { null }) }) }
+            }
+
+            // The two clips that carry accent-coloured hardware — the flag's pole, and
+            // the headband and dumbbells — sit directly above the swatches that colour
+            // them, animating, so a colour is judged on the artwork it will appear on
+            // rather than on a square.
+            val mascots = MascotPairView(context).apply {
+                bodyColor = style.mascotBody ?: MascotRenderer.BODY_PURPLE
+                accentColor = style.mascotAccent
+                    ?: if (index == 1) MascotRenderer.ACCENT_WORK else MascotRenderer.ACCENT_ORANGE
+            }
+            looks.addView(mascots, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(context, 8) })
+
+            SettingsRows.colorGrid(looks, listOf(
+                SettingsRows.Swatch("Accent", style.accent ?: account.accent) { c ->
+                    write { it.copy(accounts = it.withStyle(index) { s -> s.copy(accent = c) }) }
+                },
+                SettingsRows.Swatch("Mascot", style.mascotBody ?: MascotRenderer.BODY_PURPLE) { c ->
+                    // Updated in place rather than by rebuilding: a rebuild would restart
+                    // both clips from frame zero on every colour change, so the artwork
+                    // would twitch each time the picker was used.
+                    mascots.bodyColor = c
+                    write { it.copy(accounts = it.withStyle(index) { s -> s.copy(mascotBody = c) }) }
+                },
+                SettingsRows.Swatch("KIT", style.mascotAccent
+                    ?: if (index == 1) MascotRenderer.ACCENT_WORK else MascotRenderer.ACCENT_ORANGE) { c ->
+                    mascots.accentColor = c
+                    write { it.copy(accounts = it.withStyle(index) { s -> s.copy(mascotAccent = c) }) }
+                },
+            ))
+
+            SettingsRows.toggle(looks, "Show the mascot", style.showMascot) { on ->
+                write { it.copy(accounts = it.withStyle(index) { s -> s.copy(showMascot = on) }) }
+            }
+
+            // ---- bars ------------------------------------------------------------
+            //
+            // Which rows this account shows. Per account because the accounts are not
+            // alike: a scoped weekly limit matters on the account that uses that model
+            // and is noise on the other.
+            val bars = card("Bars")
+            val allKinds = listOf("session" to "5-hour", "weekly_all" to "7-day all",
+                "weekly_scoped" to "7-day scoped")
+            val shown = config.barsFor(index)
+            allKinds.forEach { (wire, name) ->
+                val isOn = wire in shown
+                SettingsRows.toggle(bars, "Show the $name bar", isOn) { on ->
+                    // The last bar cannot be switched off. An account with no bars is a
+                    // heading and a mascot standing on nothing, which on the panel is
+                    // indistinguishable from an account whose data failed to load.
+                    if (!on && shown.size <= 1) {
+                        android.widget.Toast.makeText(context,
+                            "An account needs at least one bar", android.widget.Toast.LENGTH_SHORT)
+                            .show()
+                        build()
+                        return@toggle
+                    }
+                    write { cfg ->
+                        val next = allKinds.map { it.first }
+                            .filter { if (it == wire) on else it in cfg.barsFor(index) }
+                        cfg.copy(accounts = cfg.withStyle(index) { s -> s.copy(barOrder = next) })
+                    }
+                    build()
+                }
+            }
+
+            // ---- rings -----------------------------------------------------------
+            //
+            // The ring in this account's position: ring N belongs to the Nth account in
+            // display order. Alone — the one connected account — it has the second ring too,
+            // with settings of its own (RingOwners); None there leaves it empty.
+            val windowNames = listOf("5-hour", "7-day all", "7-day scoped")
+            // Positional against RingMetric.entries, so this list and that enum have
+            // to stay in the same order.
+            val metricNames = listOf("Time to reset", "Utilisation", "None")
+            val order = config.orderedAccounts(Account.entries.size)
+            val position = order.indexOf(index)
+            val live = dev.kb896.aiusage.service.Graph.of(context).repository.state.value
+            val canPair = RingOwners.canPair(index, order) { i ->
+                live.statuses.firstOrNull { it.account.ordinal == i }?.connected ?: true
+            }
+            val paired = canPair
+            val rings = card("Rings")
+            fun ringRows(name: String, spec: RingSpec, fresh: () -> RingSpec, put: (PanelConfig, RingSpec) -> PanelConfig) {
+                SettingsRows.choice(rings, "$name window", windowNames, RingWindow.entries.indexOf(spec.window), icon = R.drawable.ic_schedule) { pos ->
+                    write { cfg -> put(cfg, fresh().copy(window = RingWindow.entries[pos])) }
+                }
+                SettingsRows.choice(rings, "$name shows", metricNames, RingMetric.entries.indexOf(spec.metric), icon = R.drawable.ic_eye) { pos ->
+                    write { cfg -> put(cfg, fresh().copy(metric = RingMetric.entries[pos])) }
+                }
+            }
+            if (position >= 0) {
+                // Read fresh on each pick, so the other half of the ring's spec is the
+                // current one rather than the one this build saw.
+                ringRows(if (paired) "Ring 1" else "Ring", config.rings.getOrElse(position) { RingSpec() },
+                    { store.load().rings.getOrElse(position) { RingSpec() } }) { cfg, spec ->
+                    cfg.copy(rings = cfg.withRing(position) { spec })
+                }
+            }
+            if (paired) {
+                ringRows("Ring 2", config.pairedRing, { store.load().pairedRing }) { cfg, spec ->
+                    cfg.copy(pairedRing = spec)
+                }
+            }
+
+            // ---- who this is ----------------------------------------------------
+            //
+            // LAST, after everything that is used regularly. Recognising an account is
+            // something you do once, when connecting it or when you have forgotten which
+            // is which; the ring settings are what you came here to change. Putting
+            // identity above them made the common task scroll past the rare one.
+            //
+            // In labelled rows. It was a single dim line squeezed above
+            // the controls, where the one thing it exists for — recognising which
+            // account you are editing — was the hardest thing on the screen to read.
+            //
+            // Masked until the device credential is confirmed. The panel never carries
+            // identity because it faces outward; this screen carries it because it is in
+            // the user's hand — but a phone gets handed across a desk unlocked, and a
+            // screen being open is not evidence that the person holding it is the owner.
+            val (holder, email, org) = ProfileStore(context).identity(account)
+            val tier = ProfileStore(context).tier(account)
+            val facts = listOf(
+                "Name" to holder,
+                "Email" to email,
+                "Organisation" to org,
+                "Plan" to tier,
+            ).filter { it.second != null }
+
+            if (facts.isNotEmpty()) {
+                val details = card("Account details")
+                val values = mutableListOf<android.widget.TextView>()
+                for ((label, value) in facts) {
+                    val row = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                    }
+                    row.addView(android.widget.TextView(context).apply {
+                        text = label
+                        textSize = 13f
+                        setTextColor(Panel.Palette.DIM)
+                        typeface = UiType.of(context)
+                        layoutParams = LinearLayout.LayoutParams(dp(context, 108), wrap)
+                    })
+                    val shownValue = android.widget.TextView(context).apply {
+                        // The plan is a bracket, not an identity — it is on the panel
+                        // already, so masking it here would be theatre.
+                        text = if (label == "Plan" || Unlock.isUnlocked()) value else MASK
+                        textSize = 13f
+                        setTextColor(Panel.Palette.FG)
+                        typeface = UiType.of(context)
+                        tag = value
+                    }
+                    if (label != "Plan") values += shownValue
+                    row.addView(shownValue)
+                    details.addView(row, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(context, 8) })
+                }
+
+                if (values.isNotEmpty()) {
+                    // One control that toggles, not two states of one screen. Hiding must
+                    // be as reachable as revealing: someone who reveals a name in front of
+                    // a colleague needs to put it away without leaving the screen.
+                    fun applyMask(masked: Boolean) {
+                        values.forEach { it.text = if (masked) MASK else it.tag as? String }
+                    }
+                    lateinit var toggle: android.widget.Button
+
+                    // The timer is posted to the view, so it dies with the view. A
+                    // Handler kept elsewhere would outlive a closed sheet and remask a
+                    // screen that no longer exists.
+                    val hideNow = Runnable {
+                        Unlock.lock()
+                        applyMask(true)
+                        toggle.text = "Reveal"
+                    }
+
+                    toggle = SettingsRows.navigationButton(details,
+                        if (Unlock.isUnlocked()) "Hide" else "Reveal", R.drawable.ic_eye) {
+                        if (Unlock.isUnlocked()) {
+                            details.removeCallbacks(hideNow)
+                            hideNow.run()
+                        } else {
+                            val activity = context as? Activity ?: return@navigationButton
+                            Unlock.require(activity, "To show this account's details") { ok ->
+                                if (ok) {
+                                    applyMask(false)
+                                    toggle.text = "Hide"
+                                    // Auto-hide, for the case none of the other triggers
+                                    // catch: no lock, no hide, no navigation — a phone
+                                    // simply put down with the details on screen.
+                                    details.removeCallbacks(hideNow)
+                                    details.postDelayed(hideNow, Unlock.WINDOW_MS)
+                                }
+                            }
+                        }
+                    }
+                    toggle.layoutParams = (toggle.layoutParams as LinearLayout.LayoutParams).apply {
+                        topMargin = dp(context, 14)
+                    }
+
+                    // Already unlocked when the sheet was rebuilt — a colour edit
+                    // rebuilds these rows — so the countdown continues from what is left
+                    // of the window rather than starting again.
+                    if (Unlock.isUnlocked()) {
+                        details.postDelayed(hideNow, Unlock.remainingMs())
+                    }
+
+                    // The screen going dark with a name on it, waiting to be read by
+                    // whoever wakes the phone, is the case this gate exists for.
+                    val watcher = Unlock.observeScreenOff(context) {
+                        applyMask(true)
+                        toggle.text = "Reveal"
+                    }
+                    sheetReceivers += watcher
+                }
+            }
+            // Glass grows when pressed and rims sit on edges: the rebuilt rows must not clip it.
+            dev.kb896.aiusage.ui.glass.Unclip.tree(content)
+        }
+
+        build()
+
+        // Rebuilt when an account connects or goes: that changes which rings this one has
+        // (RingOwners), and a sign-in lands with the poll after it, not with the sign-in's
+        // own callback — so the second ring's rows only appeared on reopening.
+        (context as? androidx.activity.ComponentActivity)?.let { activity ->
+            var connectedSet: List<Boolean>? = null
+            sheetJobs += activity.lifecycleScope.launch {
+                dev.kb896.aiusage.service.Graph.of(context).repository.state.collect { fresh ->
+                    val now = Account.entries.map { a -> fresh.statuses.firstOrNull { it.account == a }?.connected ?: true }
+                    if (connectedSet != null && now != connectedSet) build()
+                    connectedSet = now
+                }
+            }
+        }
+    }
+
+    /** The page is closing: re-lock, and drop what it registered. */
+    fun release(context: Context) {
+        // Leaving the page re-locks. The unlock is for looking at one account now, not for
+        // the rest of the session.
+        Unlock.lock()
+        // Leaking a receiver per open would eventually crash the process.
+        sheetReceivers.forEach { runCatching { context.unregisterReceiver(it) } }
+        sheetReceivers.clear()
+        // Same for the collectors: the activity's scope outlives the page.
+        sheetJobs.forEach { it.cancel() }
+        sheetJobs.clear()
+    }
+
+    /**
+     * Ask which route, then take it.
+     *
+     * Asked rather than shown side by side, because it is a one-off decision made once
+     * per account and then never again — and the two routes are not comparable options
+     * so much as answers to "can this account do device login". Keeping both on screen
+     * afterwards, with a paste field between them, made the common case look unfinished.
+     */
+    private fun chooseConnection(context: Context, account: Account, onDone: () -> Unit) {
+        // Two of the app's own buttons rather than setItems. A dialog's list rows are
+        // built by an adapter as they appear, so they arrive in the platform's typeface
+        // and colours and there is no reliable moment at which to repaint them — and
+        // these two rows are the first thing a new user sees.
+        val box = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 20), dp(context, 4), dp(context, 20), 0)
+        }
+        val dialog = Modal.builder(context)
+            .setTitle("Connect this account")
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .create()
+        SettingsRows.navigation(box, "Sign in with a browser", icon = R.drawable.ic_globe) {
+            dialog.dismiss()
+            (context as? MainActivity)?.signInFor(account) { failure ->
+                android.widget.Toast.makeText(context,
+                    failure ?: "Signed in", android.widget.Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+        }
+        SettingsRows.navigation(box, "Import a token", icon = R.drawable.ic_key) {
+            dialog.dismiss()
+            promptForToken(context, account, onDone)
+        }
+        // The disclosure for the browser sign-in lives here, in the chooser that is already
+        // in front of it, rather than in a second dialog after the tap: this is where the
+        // decision to connect an account is made. See Privacy.
+        SettingsRows.note(box, Privacy.SIGN_IN)
+        Modal.show(dialog)
+    }
+
+    /**
+     * The paste field, with the shape it expects shown beside it.
+     *
+     * Shown rather than described: "paste your credentials" is not an instruction anyone
+     * can follow, because this is a specific object out of a keychain entry whose field
+     * names nobody guesses.
+     */
+    private fun promptForToken(context: Context, account: Account, onDone: () -> Unit) {
+        val box = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 20), dp(context, 12), dp(context, 20), 0)
+        }
+        val paste = dev.kb896.aiusage.ui.glass.GlassField(context).apply {
+            hint = "Paste the credential JSON"
+            textSize = 12f
+            setTextColor(Panel.Palette.FG)
+            setHintTextColor(Panel.Palette.DIM)
+            typeface = UiType.of(context)
+            minLines = 3
+        }
+        // A credential already waiting in our own storage, put there by the export
+        // helper over adb. Saying so is the difference between a dialog that looks like
+        // it needs something and one that is ready — and the alternative was the user
+        // hunting for text to paste that macOS cannot hand them anyway, because the two
+        // clipboards are not shared.
+        val staged = java.io.File(context.filesDir, "work-token.json")
+        if (staged.canRead()) {
+            box.addView(android.widget.TextView(context).apply {
+                text = "A credential is staged on this device. Import takes it — " +
+                    "leave the field empty."
+                textSize = 11f
+                setTextColor(Panel.Palette.WORK)
+                typeface = UiType.of(context)
+                setPadding(0, 0, 0, dp(context, 8))
+            })
+        }
+        box.addView(paste)
+        box.addView(android.widget.TextView(context).apply {
+            text = TokenStatus.EXAMPLE
+            textSize = 10f
+            setTextColor(Panel.Palette.DIM)
+            typeface = UiType.of(context)
+            setPadding(0, dp(context, 8), 0, 0)
+        })
+
+        Modal.show(Modal.builder(context)
+            .setTitle("Import a token")
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Import") { _, _ ->
+                val failure = (context as? MainActivity)
+                    ?.importTokenFor(account, paste.text?.toString().orEmpty())
+                // Cleared whatever happens: a credential left in a field stays in the
+                // view hierarchy, recoverable from a screenshot and restored on rotation.
+                paste.setText("")
+                android.widget.Toast.makeText(context,
+                    failure ?: "Token imported", android.widget.Toast.LENGTH_SHORT).show()
+                onDone()
+            })
+    }
+
+    /** Long enough to read as redacted rather than as a value that happens to be short. */
+    private const val MASK = "••••••••"
+
+    private fun dp(context: Context, value: Int) =
+        (value * context.resources.displayMetrics.density).toInt()
+}

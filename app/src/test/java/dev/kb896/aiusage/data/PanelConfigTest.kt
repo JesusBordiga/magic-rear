@@ -1,0 +1,210 @@
+package dev.kb896.aiusage.data
+
+import dev.kb896.aiusage.Panel
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Test
+
+class PanelConfigTest {
+
+    /** The whole safety argument for putting this in a live payload. */
+    @Test fun `defaults reproduce what was previously compiled in`() {
+        val d = PanelConfig.DEFAULT
+        assertEquals("CLAUDE USAGE", d.title)
+        assertEquals(Panel.Palette.BG, d.background)
+        assertEquals(Panel.RAMP_STOPS.map { it.second }, d.rampColors)
+        assertEquals(RingWindow.SESSION, d.rings[0].window)
+        assertEquals(RingMetric.TIME_TO_RESET, d.rings[0].metric)
+        // the measured ring geometry, previously constants in RingGeometry
+        assertEquals(RingLayout(cx = 150, cyFirst = 144, cySecond = 420, radius = 128, stroke = 25),
+            d.ringLayout)
+    }
+
+    @Test fun `round trips`() {
+        val c = PanelConfig.DEFAULT.copy(
+            title = "MY USAGE",
+            background = 0xFF102030.toInt(),
+            ringLayout = RingLayout(cx = 160, cyFirst = 150, cySecond = 430, radius = 120, stroke = 20),
+            showClock = true,
+        )
+        assertEquals(c, PanelConfig.decode(PanelConfig.encode(c)))
+    }
+
+    /** A config written by an older build has fewer keys; it must not lose the rest. */
+    @Test fun `missing fields take defaults`() {
+        val c = PanelConfig.decode("""{"title":"ONLY TITLE"}""")
+        assertEquals("ONLY TITLE", c.title)
+        assertEquals(PanelConfig.DEFAULT.background, c.background)
+        assertEquals(PanelConfig.DEFAULT.ringLayout, c.ringLayout)
+    }
+
+    /**
+     * A payload from a NEWER build reaches an older :rear process during an install.
+     * Throwing there would blank the panel until the next respawn.
+     */
+    @Test fun `unknown fields are ignored`() {
+        val c = PanelConfig.decode("""{"title":"T","somethingFromTheFuture":42}""")
+        assertEquals("T", c.title)
+    }
+
+    @Test fun `garbage decodes to defaults rather than throwing`() {
+        assertEquals(PanelConfig.DEFAULT, PanelConfig.decode("not json"))
+        assertEquals(PanelConfig.DEFAULT, PanelConfig.decode(null))
+        assertEquals(PanelConfig.DEFAULT, PanelConfig.decode(""))
+    }
+
+    @Test fun `a changed field really is different`() {
+        assertNotEquals(PanelConfig.DEFAULT, PanelConfig.DEFAULT.copy(title = "X"))
+        assertNotEquals(PanelConfig.DEFAULT,
+            PanelConfig.DEFAULT.copy(ringLayout = RingLayout(cx = 151)))
+    }
+
+    /**
+     * A ring belongs to the account in the same POSITION, so reordering accounts carries
+     * the rings with them and there is nothing to keep in step by hand.
+     */
+    @Test fun `display order decides which account a ring reports on`() {
+        val d = PanelConfig.DEFAULT
+        assertEquals(listOf(0, 1), d.orderedAccounts(2))
+        val swapped = d.copy(accountOrder = listOf(1, 0))
+        assertEquals(listOf(1, 0), swapped.orderedAccounts(2))
+    }
+
+    /** A stale order — written when there were fewer accounts — must not hide one. */
+    @Test fun `an incomplete order still lists every account`() {
+        val c = PanelConfig.DEFAULT.copy(accountOrder = listOf(1))
+        assertEquals(listOf(1, 0), c.orderedAccounts(2))
+    }
+
+    /** Nor may a duplicated or out-of-range entry drop a real account off the panel. */
+    @Test fun `a malformed order is repaired rather than obeyed`() {
+        val c = PanelConfig.DEFAULT.copy(accountOrder = listOf(1, 1, 7, -3))
+        assertEquals(listOf(1, 0), c.orderedAccounts(2))
+    }
+
+    // ---- per-account appearance ------------------------------------------------------
+
+    /**
+     * null means "use the built-in", never "blank". Storing the resolved value at first
+     * write would freeze today's defaults into every config ever saved, and a later
+     * change to a default would reach nobody.
+     */
+    @Test fun `an unset style leaves every field null`() {
+        val d = PanelConfig.DEFAULT.styleFor(0)
+        assertEquals(null, d.label)
+        assertEquals(null, d.accent)
+        assertEquals(null, d.mascotBody)
+        assertEquals(null, d.mascotAccent)
+    }
+
+    /** A short or absent list must behave exactly like an unset entry, not throw. */
+    @Test fun `a missing entry is the same as an unset one`() {
+        val c = PanelConfig.DEFAULT.copy(accounts = emptyList())
+        assertEquals(AccountStyle(), c.styleFor(0))
+        assertEquals(AccountStyle(), c.styleFor(7))
+    }
+
+    @Test fun `styles round trip`() {
+        val c = PanelConfig.DEFAULT.copy(accounts = listOf(
+            AccountStyle(label = "HOME", accent = 0xFF00FF00.toInt()),
+            AccountStyle(mascotBody = 0xFF123456.toInt(), mascotAccent = 0xFF654321.toInt()),
+        ))
+        val back = PanelConfig.decode(PanelConfig.encode(c))
+        assertEquals("HOME", back.styleFor(0).label)
+        assertEquals(0xFF123456.toInt(), back.styleFor(1).mascotBody)
+        assertEquals(null, back.styleFor(0).mascotBody)
+    }
+
+    // ---- bar order -------------------------------------------------------------------
+
+    /** The order is a WHITELIST: a kind left out is hidden, not sorted last. */
+    @Test fun `bar order defaults to all three, in reading order`() {
+        assertEquals(listOf("session", "weekly_all", "weekly_scoped"), PanelConfig.DEFAULT.barOrder)
+    }
+
+    // ---- editing short lists ---------------------------------------------------------
+
+    /**
+     * A stored config can be shorter than the number of accounts — written when there
+     * were fewer, or by hand. Editing past the end must GROW the list; a plain map would
+     * silently do nothing and the setting would appear not to work.
+     */
+    @Test fun `editing a style past the end grows the list`() {
+        val c = PanelConfig.DEFAULT.copy(accounts = listOf(AccountStyle()))
+        val grown = c.withStyle(1) { it.copy(label = "SECOND") }
+        assertEquals(2, grown.size)
+        assertEquals("SECOND", grown[1].label)
+        assertEquals(null, grown[0].label)
+    }
+
+    /** Appended to the enum, so the concern is whether the older names still decode. */
+    @Test fun `a ring set to NONE survives the round trip`() {
+        val c = PanelConfig(rings = listOf(
+            RingSpec(metric = RingMetric.NONE),
+            RingSpec(metric = RingMetric.UTILIZATION),
+        ))
+        val back = PanelConfig.decode(PanelConfig.encode(c))
+        assertEquals(RingMetric.NONE, back.rings[0].metric)
+        assertEquals(RingMetric.UTILIZATION, back.rings[1].metric)
+    }
+
+    @Test fun `editing a ring past the end grows the list`() {
+        val c = PanelConfig.DEFAULT.copy(rings = listOf(RingSpec()))
+        val grown = c.withRing(1) { it.copy(metric = RingMetric.UTILIZATION) }
+        assertEquals(2, grown.size)
+        assertEquals(RingMetric.UTILIZATION, grown[1].metric)
+    }
+
+    @Test fun `editing an existing entry leaves its neighbours alone`() {
+        val c = PanelConfig.DEFAULT.copy(accounts = listOf(
+            AccountStyle(label = "A"), AccountStyle(label = "B")))
+        val edited = c.withStyle(0) { it.copy(accent = 1) }
+        assertEquals("B", edited[1].label)
+        assertEquals(1, edited[0].accent)
+        assertEquals("A", edited[0].label)
+    }
+
+    // ---- per-account bars ------------------------------------------------------------
+
+    /** Unset means inherit the panel default, so a later change to it still lands. */
+    @Test fun `an account with no choice inherits the default order`() {
+        assertEquals(PanelConfig.DEFAULT.barOrder, PanelConfig.DEFAULT.barsFor(0))
+    }
+
+    @Test fun `an account can choose its own rows`() {
+        val c = PanelConfig.DEFAULT.copy(accounts = listOf(
+            AccountStyle(barOrder = listOf("weekly_all"))))
+        assertEquals(listOf("weekly_all"), c.barsFor(0))
+        assertEquals(PanelConfig.DEFAULT.barOrder, c.barsFor(1))
+    }
+
+    /**
+     * An account with no bars is a heading and a mascot standing on nothing, which on
+     * the panel is indistinguishable from an account whose data failed to load. The UI
+     * refuses to remove the last one; this is the backstop for a config edited by hand.
+     */
+    @Test fun `an empty order falls back rather than showing nothing`() {
+        val c = PanelConfig.DEFAULT.copy(accounts = listOf(AccountStyle(barOrder = emptyList())))
+        assertEquals(PanelConfig.DEFAULT.barOrder, c.barsFor(0))
+    }
+
+    @Test fun `the mascot is on unless switched off`() {
+        assertEquals(true, PanelConfig.DEFAULT.styleFor(0).showMascot)
+        val c = PanelConfig.DEFAULT.copy(accounts = listOf(AccountStyle(showMascot = false)))
+        assertEquals(false, c.styleFor(0).showMascot)
+        assertEquals(true, c.styleFor(1).showMascot)
+    }
+
+    @Test fun `the old default green becomes the purple, a picked colour stays`() {
+        val raw = PanelConfig.encode(PanelConfig(
+            titleColor = 0xFFB5BD68.toInt(), closeColor = 0xFF123456.toInt(), portalFrameColor = 0xFF28FF85.toInt(),
+            clockColor = 0xFFE7FF00.toInt(), rampColors = listOf(0xFFB5BD68.toInt(), 0xFF654321.toInt()),
+        ))
+        val back = PanelConfig.decode(raw)
+        assertEquals(dev.kb896.aiusage.Panel.Palette.WORK, back.titleColor)
+        assertEquals(0xFF123456.toInt(), back.closeColor)
+        assertEquals(dev.kb896.aiusage.Panel.Palette.WORK, back.portalFrameColor)
+        assertEquals(0xFFC26BFF.toInt(), back.clockColor)
+        assertEquals(listOf(dev.kb896.aiusage.Panel.Palette.WORK, 0xFF654321.toInt()), back.rampColors)
+    }
+}

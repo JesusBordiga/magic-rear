@@ -1,0 +1,356 @@
+package dev.kb896.aiusage.service
+
+import android.content.Intent
+import android.os.SystemClock
+import android.service.notification.NotificationListenerService
+import android.service.notification.StatusBarNotification
+import android.util.Log
+import dev.kb896.aiusage.data.ConfigStore
+import dev.kb896.aiusage.rear.RearActivity
+
+/**
+ * Passes other apps' notifications to the rear panel.
+ *
+ * This is the same mechanism KDE Connect uses to mirror notifications to a desktop, and
+ * the same one the phone's other rear-screen tools use — both were already holding
+ * notification access on this device when the feature was asked for. It needs the user
+ * to grant it in Settings, which cannot be done from code and is the whole cost of the
+ * feature.
+ *
+ * What crosses to the panel is deliberately small: the app's label, a title and one line
+ * of text. Not the icon, not the actions, not the extras bundle. The panel draws a strip
+ * of pixels on the back of a phone — it can hold a sentence, and anything more would be
+ * collected for nothing.
+ *
+ * PRIVACY, and it is the reason this is off by default and behind its own switch: this
+ * display faces AWAY from its owner. Everything it shows is shown to whoever is behind
+ * them and not to them. A message that would be private on the front screen is on
+ * display here, so the content line is a separate opt-in from the feature itself.
+ */
+class NotificationRelay : NotificationListenerService() {
+
+    // What RelayWatch reads to know whether the relay needs binding again.
+    override fun onListenerConnected() {
+        RelayWatch.connected = true
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, matching,
+            android.content.IntentFilter().apply {
+                addAction(RearActivity.ACTION_DISMISS_NOTIFICATION)
+                addAction(RearActivity.ACTION_NOTIFICATIONS_SYNC)
+            },
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        matchingRegistered = true
+        // Debug builds only: `adb shell am broadcast -a dev.kb896.aiusage.DEBUG_UNBIND -p <pkg>`
+        // drops the binding with access still granted — the state HyperOS left the release
+        // in — so RelayWatch's rebind can be watched doing its job.
+        if (dev.kb896.aiusage.BuildConfig.DEBUG && !debugRegistered) {
+            androidx.core.content.ContextCompat.registerReceiver(
+                this, debugUnbind, android.content.IntentFilter(DEBUG_UNBIND),
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
+            )
+            debugRegistered = true
+        }
+        // Whatever left the front while the relay was not bound, the back finds out now.
+        sendActive()
+        // And whatever is on the front already has been seen: an alert-once update of it is
+        // not news, however long ago the relay last heard of it. See NotificationAlert.
+        runCatching { activeNotifications }.getOrNull()?.let { all -> seen.seed(all.map { it.key }) }
+    }
+
+    /** Every key posted, ongoing or not — see NotificationAlert.SeenKeys. */
+    private val seen = NotificationAlert.SeenKeys()
+
+    private var debugRegistered = false
+    private val debugUnbind = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: Intent) {
+            Log.i(TAG, "debug: unbinding the relay, access left granted")
+            requestUnbind()
+        }
+    }
+
+    override fun onListenerDisconnected() {
+        RelayWatch.connected = false
+        if (matchingRegistered) runCatching { unregisterReceiver(matching) }
+        matchingRegistered = false
+    }
+
+    // ---- matching the front (PanelConfig.matchFrontNotifications) ----
+
+    private var matchingRegistered = false
+
+    private val matching = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: Intent) {
+            if (!ConfigStore(this@NotificationRelay).load().matchFrontNotifications) return
+            when (intent.action) {
+                // Swiped away on the back: cleared on the front.
+                RearActivity.ACTION_DISMISS_NOTIFICATION ->
+                    intent.getStringExtra(RearActivity.EXTRA_NOTIFICATION_KEY)?.takeIf { it.isNotEmpty() }?.let { key ->
+                        runCatching { cancelNotification(key) }.onFailure { Log.w(TAG, "dismiss failed: ${it.message}") }
+                        BackNotices.removed(this@NotificationRelay, key)
+                    }
+                RearActivity.ACTION_NOTIFICATIONS_SYNC -> sendActive()
+            }
+        }
+    }
+
+    /** What is on the front now, every key, so the back drops what has left. */
+    private fun sendActive() {
+        if (!ConfigStore(this).load().matchFrontNotifications) return
+        val keys = runCatching { activeNotifications }.getOrNull()?.map { it.key } ?: return
+        BackNotices.keep(this, keys.toSet())
+        sendBroadcast(
+            Intent(RearActivity.ACTION_NOTIFICATIONS_ACTIVE).setPackage(packageName)
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_KEYS, keys.toTypedArray()),
+        )
+    }
+
+    /** Gone from the front — swiped, tapped, cleared, withdrawn: gone from the back too. */
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        // Gone, so the same key posted again later is new again — whatever the switches say.
+        seen.forget(sbn.key)
+        if (!ConfigStore(this).load().matchFrontNotifications) return
+        BackNotices.removed(this, sbn.key)
+        sendBroadcast(
+            Intent(RearActivity.ACTION_NOTIFICATION_REMOVED).setPackage(packageName)
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_KEY, sbn.key),
+        )
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // FIRST, before anything can return: whether this key was posted before. The filters
+        // below drop ongoing posts, and a player's first post after it pauses — the first one
+        // not ongoing — must still be known as an update of something already seen.
+        val seenBefore = seen.see(sbn.key)
+        val config = ConfigStore(this).load()
+        if (!config.showNotifications) return
+
+        // Ours would be a loop: the poll service's own ongoing notification is posted
+        // continuously, and relaying it would put the panel's own readings back onto the
+        // panel once a minute.
+        if (sbn.packageName == packageName) return
+        // Ongoing notifications are the state of something rather than an event — a
+        // media player, a download, another app's foreground service. They are posted
+        // and re-posted constantly and none of them is news.
+        if (sbn.isOngoing) return
+        if (!sbn.isClearable) return
+
+        // GROUP SUMMARIES. This is the one that matters in practice.
+        //
+        // An app that can produce several related notifications posts each of them AND a
+        // summary standing for the whole group — WhatsApp sends the message, then "2
+        // messages from 2 chats" a moment later. Both are real notifications and the
+        // summary arrives second, so it replaced the actual message on the wheel a split
+        // second after it appeared: you saw who it was from just long enough to know you
+        // had missed it.
+        //
+        // The summary is the one to drop. It carries a count where the child carries the
+        // content, and the child is what someone glancing at the back of a phone wants.
+        if (sbn.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY != 0) return
+
+        // Categories that are never news either. Same reasoning as isOngoing, but these
+        // are how an app DECLARES it rather than how the system infers it.
+        when (sbn.notification.category) {
+            android.app.Notification.CATEGORY_SERVICE,
+            android.app.Notification.CATEGORY_PROGRESS,
+            android.app.Notification.CATEGORY_TRANSPORT,
+            -> return
+        }
+
+        val extras = sbn.notification.extras
+        // Would the FRONT alert for this? The back wakes only if so — see NotificationAlert.
+        // A paused player is the case that was seen: no longer ongoing, clearable, no
+        // category, a song title for a headline — so it is told by its media session.
+        val ranking = android.service.notification.NotificationListenerService.Ranking()
+        val ranked = runCatching { currentRanking?.getRanking(sbn.key, ranking) }.getOrNull() == true
+        val verdict = NotificationAlert.verdict(
+            media = extras.containsKey(android.app.Notification.EXTRA_MEDIA_SESSION) ||
+                sbn.notification.category == android.app.Notification.CATEGORY_TRANSPORT,
+            importance = if (ranked) ranking.importance else null,
+            matchesFilter = if (ranked) ranking.matchesInterruptionFilter() else null,
+            onlyAlertOnce = sbn.notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE != 0,
+            seenBefore = seenBefore,
+        )
+        if (verdict == NotificationAlert.Verdict.DROP) return
+        val title = extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString()
+        val text = extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString()
+        val app = appLabel(sbn.packageName)
+        if (title.isNullOrBlank() && text.isNullOrBlank()) return
+
+        // The body only when it was asked for separately. See the class note: the back of
+        // the phone is the one screen its owner cannot see and everyone else can.
+        val body = if (config.showNotificationText) text else null
+
+        // The same notification arrives more than once, and not rarely: a single post
+        // measured TWO onNotificationPosted calls two milliseconds apart. The system
+        // re-delivers on ranking changes and on any update to a notification already
+        // showing, and neither is news — but the panel treated each as a fresh arrival
+        // and turned the wheel, so every message replaced itself with a copy of itself
+        // the instant it appeared.
+        //
+        // Keyed on the CONTENT rather than on sbn.key alone: an app that genuinely edits
+        // a notification in place — a download percentage, a message being corrected —
+        // keeps the same key, and that IS worth showing again.
+        val fingerprint = "${sbn.key}\u0000$title\u0000$body"
+        if (fingerprint == lastFingerprint && SystemClock.elapsedRealtime() - lastAt < DEDUPE_MS) {
+            return
+        }
+        lastFingerprint = fingerprint
+        lastAt = SystemClock.elapsedRealtime()
+        // The group's summary, under the headline. See cascade.
+        //
+        // A grouped app posts one notification per conversation plus a summary standing
+        // for all of them. The summary cannot be the headline — it arrives second and
+        // would replace the message you actually want — but it is the right thing to put
+        // UNDER one, because saying how much more there is is what it was written for.
+        val next = cascade(sbn)
+
+        Log.i(TAG, "relaying from ${sbn.packageName}${if (next != null) " (+1 in group)" else ""}" +
+            if (verdict == NotificationAlert.Verdict.CARD) " — a card only, the front would not alert for it" else "")
+
+        // Not one the front would alert for: a card for a back somebody is already looking
+        // at, and the panel drops it if the back is dark. No light, no lock, no settle.
+        if (verdict == NotificationAlert.Verdict.CARD) {
+            relay(app, sbn, title, body, next, config)
+            return
+        }
+
+        // LIGHT THE PANEL FIRST, then tell it.
+        //
+        // The rear display dozes on its own, and a notification delivered to a sleeping
+        // one is five seconds of strip animating in the dark followed by nothing to see.
+        // Worse, the panel now DROPS what arrives while it is dark — deliberately, so
+        // that waking it does not replay the night — so without this a notification while
+        // it dozed was simply lost rather than merely unseen.
+        //
+        // The order matters and so does the pause. The panel decides whether to keep a
+        // notice by asking its display whether there is a screen to show it on, and that
+        // answer does not change the instant the keyevent is sent. A fifth of a second is
+        // below noticing and comfortably past the state settling.
+        val bridge = runCatching { Graph.of(this).bridge }.getOrNull()
+        // A panel that was DARK a moment ago is a panel nobody was looking at, and a
+        // phone nobody is looking at is very often in a pocket. Lock it, so the
+        // notification does not arrive on a surface where a thigh can work the transport
+        // buttons. If it was already lit, nothing changes: it was already there to be
+        // touched, and seizing up in front of somebody using it would be the cure doing
+        // the harm.
+        if (bridge?.wake("a notification") == true) {
+            sendBroadcast(Intent(RearActivity.ACTION_LOCK).setPackage(packageName))
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            relay(app, sbn, title, body, next, config)
+        }, WAKE_SETTLE_MS)
+    }
+
+    private fun relay(
+        app: String,
+        sbn: StatusBarNotification,
+        title: String?,
+        body: String?,
+        next: Pair<String, String>?,
+        config: dev.kb896.aiusage.data.PanelConfig,
+    ) {
+        BackNotices.posted(
+            this,
+            dev.kb896.aiusage.rear.NoticeShade.Item(sbn.key, sbn.packageName, app, title.orEmpty(), body.orEmpty()),
+        )
+        sendBroadcast(
+            Intent(RearActivity.ACTION_NOTIFICATION)
+                .setPackage(packageName)
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_APP, app)
+                // The package, not the icon itself. :rear can ask PackageManager for a
+                // drawable; putting a Bitmap through a broadcast would copy it across
+                // the process boundary on every notification for no gain.
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_PKG, sbn.packageName)
+                // Which front notification this is, so its card can follow it there.
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_KEY, sbn.key)
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_TITLE, title.orEmpty())
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_TEXT, body.orEmpty())
+                .putExtra(RearActivity.EXTRA_NOTIFICATION_MORE_TITLE, next?.first.orEmpty())
+                .putExtra(
+                    RearActivity.EXTRA_NOTIFICATION_MORE_TEXT,
+                    // The second card's body obeys the same switch as the first's.
+                    if (config.showNotificationText) next?.second.orEmpty() else "",
+                ),
+        )
+    }
+
+    /**
+     * THIS ONE'S GROUP SUMMARY, or null.
+     *
+     * The second line under the headline used to be the newest OTHER message in the
+     * group, which reads as a second notification and is the wrong thing entirely: two
+     * unrelated messages stacked on a panel look like a list you are meant to read, and
+     * the older of them is not news by the time you see it.
+     *
+     * What belongs there is the summary — the "2 messages from 2 chats" line the app
+     * posts alongside its children. It says how much more there is without pretending to
+     * be a second event, which is exactly the job of a line under a headline.
+     *
+     * The summary is still never relayed as a headline in its own right; see the
+     * FLAG_GROUP_SUMMARY drop above, which exists because the summary arrives second and
+     * replaced the actual message. Dropped as a headline, kept as a subtitle.
+     *
+     * Title and text stay separate so the panel can lay them out; flattening them here
+     * would decide the design in the wrong place.
+     */
+    private fun cascade(sbn: StatusBarNotification): Pair<String, String>? {
+        val group = sbn.notification.group ?: return null
+        val active = runCatching { activeNotifications }.getOrNull() ?: return null
+        return active
+            .firstOrNull {
+                it.notification.group == group &&
+                    it.packageName == sbn.packageName &&
+                    it.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY != 0
+            }
+            ?.let { summary ->
+                val e = summary.notification.extras
+                val h = e.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString()
+                // EXTRA_TEXT first, then EXTRA_SUMMARY_TEXT: apps disagree about which
+                // one carries the count, and a summary with neither is a summary worth
+                // nothing to look at.
+                val t = e.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString()
+                    ?: e.getCharSequence(android.app.Notification.EXTRA_SUMMARY_TEXT)?.toString()
+                if (h.isNullOrBlank() && t.isNullOrBlank()) null else (h.orEmpty() to t.orEmpty())
+            }
+    }
+
+    /**
+     * The app's human name, falling back to its package.
+     *
+     * A package name is not nothing — it identifies the sender — and showing
+     * "com.whatsapp" beats showing a blank where an app should be.
+     */
+    private fun appLabel(pkg: String): String = runCatching {
+        val pm = packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+    }.getOrDefault(pkg)
+
+    /** The last thing relayed, and when — see the de-duplication above. */
+    private var lastFingerprint: String? = null
+    private var lastAt = 0L
+
+    private companion object {
+        /**
+         * How long the wake is given before the notice is sent.
+         *
+         * The panel asks its display whether it is on, and that does not become true the
+         * moment the keyevent is sent. Below noticing, comfortably past the settle.
+         */
+        const val WAKE_SETTLE_MS = 200L
+
+        const val TAG = "AiUsageNotif"
+
+        const val DEBUG_UNBIND = "dev.kb896.aiusage.DEBUG_UNBIND"
+
+        /**
+         * How long an identical notification is treated as the same one.
+         *
+         * Generous. The duplicates measured were milliseconds apart, but the cost of
+         * being wrong in this direction is a repeat that is silently dropped, and the
+         * cost in the other is the panel flickering as a message replaces itself.
+         */
+        const val DEDUPE_MS = 3_000L
+
+    }
+}
